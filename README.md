@@ -14,11 +14,48 @@ A **30 × 20 shared grid** is tied to each Reddit post.  Every logged-in user ge
 | ⚔️ Attack | 1 | Attack an enemy cell (remove fort first, then capture) |
 | 🛡 Fortify | 1 | Shield one of your cells — it takes 2 hits to capture |
 
+### Engagement & Retention Features
+
+**🏆 Achievement System**
+- 11 unique achievements to unlock (First Blood, Conqueror, Warlord, etc.)
+- Real-time achievement notifications with animated popups
+- Achievement badges displayed in-game
+- Earn karma rewards for unlocking achievements
+
+**📊 Player Statistics**
+- Track total tiles claimed, attacks, and fortifications
+- Monitor your longest and current login streak
+- Visual stats panel with real-time updates
+- Comprehensive karma earning system
+
+**🔥 Daily Streaks & Rewards**
+- Login daily to maintain your streak
+- Unlock streak-based achievements (3, 7, 30 days)
+- Streak counter displayed prominently in HUD
+- Daily action resets encourage regular engagement
+
+**💰 Karma Integration**
+- Earn karma for every action: +1 for claims, +2 for attacks, +1 for fortifications
+- Bonus karma for unlocking achievements (+10 each)
+- Karma displayed in HUD with eye-catching gradient badge
+- Potential Reddit karma integration for rewards
+
+**🎨 Visual Enhancements**
+- Animated cell capture effects with flash and ripple animations
+- Glowing fort indicators with pulsing effects
+- Pulsing action counter badge
+- Medals (🥇🥈🥉) for top 3 leaderboard positions
+- Smooth animations and particle effects for actions
+
 ### Why it drives retention
-- **Daily action cap** — users come back every day to spend their 5 moves.
-- **Asynchronous PvP** — every move you make is a permanent threat to others.
-- **Live leaderboard** — top 10 tile-holders shown in real time.
-- **Social stakes** — subreddit communities can coordinate to protect territory.
+- **Daily action cap** — users come back every day to spend their 5 moves
+- **Asynchronous PvP** — every move you make is a permanent threat to others
+- **Live leaderboard** — top 10 tile-holders shown in real time with medals
+- **Social stakes** — subreddit communities can coordinate to protect territory
+- **Achievement hunting** — 11 unique achievements encourage long-term play
+- **Streak mechanics** — daily login rewards create habit formation
+- **Visual feedback** — satisfying animations make every action feel impactful
+- **Progress tracking** — comprehensive stats dashboard shows growth over time
 
 ---
 
