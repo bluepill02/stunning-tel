@@ -588,14 +588,13 @@ Devvit.addCustomPostType({
     }
 
     return (
-      <vstack height="100%" width="100%" alignment="center middle">
-        <webview
-          id="subrwar-game"
-          url="index.html"
-          width="100%"
-          height="100%"
-          grow
-        />
+      <vstack height="100%" width="100%" alignment="center middle" backgroundColor="#1a1a2e" gap="medium">
+        <text color="#e94560" size="xxlarge" weight="bold">⚔️ SUBRWAR</text>
+        <text color="#cccccc" size="medium">Daily Territory-Control Battle</text>
+        <text color="#aaaaaa" size="small">Playing as: {username}</text>
+        <button appearance="primary" size="large" onPress={() => webView.mount()}>
+          ⚔️ Enter Battle
+        </button>
       </vstack>
     );
   },
