@@ -1,0 +1,17 @@
+{
+  "name": "subrwar",
+  "version": "0.0.1",
+  "description": "Subrwar – a daily territory-control game built on Reddit with Devvit + Phaser 3",
+  "type": "module",
+  "scripts": {
+    "dev": "devvit playtest",
+    "upload": "devvit upload",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@devvit/public-api": "0.11.11"
+  },
+  "devDependencies": {
+    "typescript": "5.4.5"
+  }
+}

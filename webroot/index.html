@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>Subrwar</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      width: 100%; height: 100%;
+      background: #1a1a2e;
+      overflow: hidden;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+    }
+    #game-container { width: 100%; height: 100%; }
+
+    /* HUD overlay --------------------------------------------------------- */
+    #hud {
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 12px;
+      background: rgba(10,10,30,0.85);
+      backdrop-filter: blur(4px);
+      z-index: 10;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    #hud .brand { font-size: 18px; font-weight: 900; color: #e94560; letter-spacing: 2px; }
+    #hud .info  { font-size: 12px; color: #ccc; }
+    #hud .info span { color: #fff; font-weight: bold; }
+    #hud .actions-badge {
+      background: #e94560; color: #fff;
+      padding: 2px 10px; border-radius: 12px;
+      font-size: 12px; font-weight: bold;
+    }
+
+    /* Legend -------------------------------------------------------------- */
+    #legend {
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      padding: 5px 10px;
+      background: rgba(10,10,30,0.85);
+      backdrop-filter: blur(4px);
+      z-index: 10;
+      flex-wrap: wrap;
+    }
+    .legend-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: #ccc; }
+    .legend-dot  { width: 12px; height: 12px; border-radius: 3px; }
+
+    /* Toast --------------------------------------------------------------- */
+    #toast {
+      position: absolute;
+      bottom: 40px; left: 50%;
+      transform: translateX(-50%) translateY(20px);
+      background: rgba(233,69,96,0.95);
+      color: #fff; font-size: 13px; font-weight: 600;
+      padding: 8px 18px; border-radius: 20px;
+      opacity: 0; transition: opacity 0.3s, transform 0.3s;
+      pointer-events: none; z-index: 20; white-space: nowrap;
+    }
+    #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+    /* Leaderboard --------------------------------------------------------- */
+    #leaderboard {
+      position: absolute;
+      top: 42px; right: 0;
+      width: 150px;
+      background: rgba(10,10,30,0.88);
+      backdrop-filter: blur(4px);
+      border-left: 2px solid #e94560;
+      padding: 8px 10px;
+      z-index: 10;
+      max-height: calc(100% - 80px);
+      overflow-y: auto;
+    }
+    #leaderboard h3 { font-size: 11px; color: #e94560; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+    .lb-entry { display: flex; justify-content: space-between; font-size: 11px; color: #ddd; margin: 3px 0; }
+    .lb-entry .lb-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 90px; }
+    .lb-entry .lb-tiles { color: #fff; font-weight: bold; flex-shrink: 0; margin-left: 4px; }
+
+    /* Context menu -------------------------------------------------------- */
+    #ctx-menu {
+      position: absolute;
+      background: rgba(15,15,40,0.97);
+      border: 1px solid #e94560;
+      border-radius: 8px;
+      padding: 6px 0;
+      z-index: 30;
+      min-width: 140px;
+      display: none;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+    }
+    #ctx-menu button {
+      display: block; width: 100%;
+      background: none; border: none;
+      color: #eee; font-size: 13px;
+      padding: 8px 16px; cursor: pointer;
+      text-align: left;
+    }
+    #ctx-menu button:hover { background: rgba(233,69,96,0.25); color: #fff; }
+    #ctx-menu .ctx-title {
+      color: #888; font-size: 11px;
+      padding: 4px 16px 6px; border-bottom: 1px solid #333;
+    }
+
+    /* Loading screen ------------------------------------------------------ */
+    #loading {
+      position: absolute; inset: 0;
+      background: #1a1a2e;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      z-index: 100; gap: 12px;
+    }
+    #loading h1 { font-size: 36px; font-weight: 900; color: #e94560; letter-spacing: 4px; }
+    #loading p  { color: #aaa; font-size: 14px; }
+    .spinner {
+      width: 36px; height: 36px;
+      border: 3px solid #333;
+      border-top-color: #e94560;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+
+<!-- Loading screen -->
+<div id="loading">
+  <h1>⚔ SUBRWAR</h1>
+  <div class="spinner"></div>
+  <p>Loading battle map…</p>
+</div>
+
+<!-- HUD -->
+<div id="hud" style="display:none">
+  <span class="brand">⚔ SUBRWAR</span>
+  <span class="info">Playing as <span id="hud-user">…</span></span>
+  <span class="info">Actions today: <span class="actions-badge" id="hud-actions">5</span></span>
+</div>
+
+<!-- Leaderboard -->
+<div id="leaderboard" style="display:none">
+  <h3>🏆 Top Players</h3>
+  <div id="lb-list"></div>
+</div>
+
+<!-- Game canvas -->
+<div id="game-container"></div>
+
+<!-- Bottom legend -->
+<div id="legend" style="display:none">
+  <span class="legend-item"><span class="legend-dot" style="background:#4cc9f0"></span>Your territory</span>
+  <span class="legend-item"><span class="legend-dot" style="background:#7209b7;border:2px solid #f72585"></span>Fortified</span>
+  <span class="legend-item"><span class="legend-dot" style="background:#e94560"></span>Enemy</span>
+  <span class="legend-item"><span class="legend-dot" style="background:#16213e"></span>Empty</span>
+  <span class="legend-item" style="color:#aaa;font-size:10px">Left-click = Claim/Attack/Info | Right-click = Actions menu</span>
+</div>
+
+<!-- Context menu -->
+<div id="ctx-menu">
+  <div class="ctx-title" id="ctx-title">Cell (0,0)</div>
+  <button id="ctx-claim">🚩 Claim</button>
+  <button id="ctx-attack">⚔ Attack</button>
+  <button id="ctx-fortify">🛡 Fortify</button>
+</div>
+
+<!-- Toast notification -->
+<div id="toast"></div>
+
+<!-- Phaser 3 (loaded from CDN — works in Devvit webview) -->
+<script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
+
+<script>
+// ─── Devvit bridge ───────────────────────────────────────────────────────────
+const DEVVIT_READY_MSG = 'devvit-message';
+
+function sendToDevvit(msg) {
+  window.parent?.postMessage({ type: 'devvit-message', data: { message: msg } }, '*');
+}
+
+// ─── Constants ──────────────────────────────────────────────────────────────
+const COLS        = 30;
+const ROWS        = 20;
+const CELL_SIZE   = 28;   // px, will be scaled to fit viewport
+const GRID_PAD    = 4;    // padding around grid
+
+// ─── Colour palette ─────────────────────────────────────────────────────────
+const C = {
+  empty:     0x16213e,
+  emptyLine: 0x0f3460,
+  mine:      0x4cc9f0,
+  mineFort:  0x7209b7,
+  enemy:     0xe94560,
+  enemyFort: 0xf72585,
+  hover:     0xffd60a,
+  bg:        0x1a1a2e,
+};
+
+// ─── State ───────────────────────────────────────────────────────────────────
+let gameState = {
+  board:       null,   // Board (ROWS × COLS)
+  username:    '',
+  actionsLeft: 0,
+  leaderboard: [],
+};
+
+let selectedCell = null; // { col, row }
+
+// ─── Phaser Scene ────────────────────────────────────────────────────────────
+class GameScene extends Phaser.Scene {
+  constructor() { super({ key: 'GameScene' }); }
+
+  create() {
+    this.cameras.main.setBackgroundColor(C.bg);
+
+    // Graphics layers
+    this.bgLayer   = this.add.graphics();
+    this.cellLayer = this.add.graphics();
+    this.gridLayer = this.add.graphics();
+    this.hlLayer   = this.add.graphics(); // highlight
+
+    // Calculate scale so grid fits the canvas
+    this._recalcLayout();
+
+    // Input
+    this.input.on('pointermove', this._onHover, this);
+    this.input.on('pointerup',   this._onClick, this);
+    this.input.on('pointerdown', (p) => { if (p.rightButtonDown()) this._onRightClick(p); });
+
+    // Canvas resize
+    this.scale.on('resize', () => { this._recalcLayout(); this._render(); }, this);
+
+    // Initial render (if data already arrived before scene started)
+    if (gameState.board) this._render();
+  }
+
+  // Compute origin + cellSize so entire grid fits in current viewport
+  _recalcLayout() {
+    const W = this.scale.width;
+    const H = this.scale.height;
+    const hudH   = 42;
+    const legendH = 30;
+    const lbW    = 150;
+
+    const availW = W - lbW - GRID_PAD * 2;
+    const availH = H - hudH - legendH - GRID_PAD * 2;
+
+    this.cellSize = Math.floor(Math.min(availW / COLS, availH / ROWS));
+    this.cellSize = Math.max(8, Math.min(this.cellSize, 36));
+
+    this.originX = GRID_PAD + Math.floor((availW - this.cellSize * COLS) / 2);
+    this.originY = hudH + GRID_PAD + Math.floor((availH - this.cellSize * ROWS) / 2);
+  }
+
+  _render() {
+    if (!gameState.board) return;
+    const s = this.cellSize;
+
+    this.bgLayer.clear();
+    this.cellLayer.clear();
+    this.gridLayer.clear();
+
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        const cell = gameState.board[r][c];
+        const x = this.originX + c * s;
+        const y = this.originY + r * s;
+
+        // Fill
+        let fillColor = C.empty;
+        if (cell.owner === gameState.username) {
+          fillColor = cell.fort ? C.mineFort : C.mine;
+        } else if (cell.owner) {
+          fillColor = cell.fort ? C.enemyFort : C.enemy;
+        }
+
+        this.cellLayer.fillStyle(fillColor, 1);
+        this.cellLayer.fillRect(x + 1, y + 1, s - 2, s - 2);
+
+        // Fort indicator
+        if (cell.fort) {
+          const fc = cell.owner === gameState.username ? 0xffd60a : 0xffffff;
+          this.cellLayer.fillStyle(fc, 0.8);
+          this.cellLayer.fillRect(x + s/2 - 3, y + s/2 - 3, 6, 6);
+        }
+
+        // Grid lines
+        this.gridLayer.lineStyle(1, C.emptyLine, 0.5);
+        this.gridLayer.strokeRect(x, y, s, s);
+      }
+    }
+  }
+
+  _cellAt(pointer) {
+    const col = Math.floor((pointer.x - this.originX) / this.cellSize);
+    const row = Math.floor((pointer.y - this.originY) / this.cellSize);
+    if (col < 0 || col >= COLS || row < 0 || row >= ROWS) return null;
+    return { col, row };
+  }
+
+  _onHover(pointer) {
+    const cell = this._cellAt(pointer);
+    this.hlLayer.clear();
+    if (!cell) return;
+    const { col, row } = cell;
+    const s = this.cellSize;
+    const x = this.originX + col * s;
+    const y = this.originY + row * s;
+    this.hlLayer.lineStyle(2, C.hover, 0.9);
+    this.hlLayer.strokeRect(x, y, s, s);
+  }
+
+  _onClick(pointer) {
+    if (pointer.rightButtonReleased()) return;
+    const cell = this._cellAt(pointer);
+    if (!cell) return;
+    const { col, row } = cell;
+    const bCell = gameState.board[row][col];
+
+    if (!bCell.owner) {
+      sendToDevvit({ type: 'CLAIM', col, row });
+    } else if (bCell.owner === gameState.username) {
+      showToast(`Your cell${bCell.fort ? ' (fortified)' : ''} — right-click to fortify`);
+    } else {
+      sendToDevvit({ type: 'ATTACK', col, row });
+    }
+  }
+
+  _onRightClick(pointer) {
+    const cell = this._cellAt(pointer);
+    if (!cell) return;
+    selectedCell = cell;
+    showCtxMenu(pointer.x, pointer.y, cell);
+  }
+
+  applyUpdate(board) {
+    gameState.board = board;
+    this._render();
+  }
+}
+
+// ─── Phaser Config ───────────────────────────────────────────────────────────
+const config = {
+  type: Phaser.AUTO,
+  parent: 'game-container',
+  backgroundColor: C.bg,
+  width:  window.innerWidth,
+  height: window.innerHeight,
+  scene:  [GameScene],
+  scale: {
+    mode: Phaser.Scale.RESIZE,
+    autoCenter: Phaser.Scale.CENTER_BOTH,
+  },
+};
+
+const game = new Phaser.Game(config);
+
+// ─── Context menu ─────────────────────────────────────────────────────────────
+const ctxMenu   = document.getElementById('ctx-menu');
+const ctxTitle  = document.getElementById('ctx-title');
+const ctxClaim  = document.getElementById('ctx-claim');
+const ctxAttack = document.getElementById('ctx-attack');
+const ctxFort   = document.getElementById('ctx-fortify');
+
+function showCtxMenu(x, y, cell) {
+  const { col, row } = cell;
+  const bCell = gameState.board ? gameState.board[row][col] : null;
+  ctxTitle.textContent = `Cell (${col}, ${row})${bCell?.owner ? ` · ${bCell.owner}` : ''}`;
+
+  ctxClaim.style.display  = (!bCell?.owner) ? 'block' : 'none';
+  ctxAttack.style.display = (bCell?.owner && bCell.owner !== gameState.username) ? 'block' : 'none';
+  ctxFort.style.display   = (bCell?.owner === gameState.username && !bCell.fort) ? 'block' : 'none';
+
+  // Clamp to viewport
+  const mw = 150, mh = 100;
+  const px = Math.min(x, window.innerWidth  - mw - 4);
+  const py = Math.min(y, window.innerHeight - mh - 4);
+  ctxMenu.style.left    = px + 'px';
+  ctxMenu.style.top     = py + 'px';
+  ctxMenu.style.display = 'block';
+}
+
+function hideCtxMenu() { ctxMenu.style.display = 'none'; }
+
+ctxClaim.onclick  = () => { if (selectedCell) sendToDevvit({ type: 'CLAIM',   col: selectedCell.col, row: selectedCell.row }); hideCtxMenu(); };
+ctxAttack.onclick = () => { if (selectedCell) sendToDevvit({ type: 'ATTACK',  col: selectedCell.col, row: selectedCell.row }); hideCtxMenu(); };
+ctxFort.onclick   = () => { if (selectedCell) sendToDevvit({ type: 'FORTIFY', col: selectedCell.col, row: selectedCell.row }); hideCtxMenu(); };
+
+document.addEventListener('click', (e) => {
+  if (!ctxMenu.contains(e.target)) hideCtxMenu();
+});
+
+// ─── Toast ────────────────────────────────────────────────────────────────────
+let toastTimer = null;
+const toastEl = document.getElementById('toast');
+
+function showToast(msg, duration = 2800) {
+  toastEl.textContent = msg;
+  toastEl.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), duration);
+}
+
+// ─── HUD helpers ─────────────────────────────────────────────────────────────
+function updateHUD() {
+  document.getElementById('hud-user').textContent    = gameState.username || '…';
+  document.getElementById('hud-actions').textContent = gameState.actionsLeft;
+}
+
+function updateLeaderboard() {
+  const list = document.getElementById('lb-list');
+  list.innerHTML = gameState.leaderboard
+    .map((e, i) => `<div class="lb-entry"><span class="lb-name">${i+1}. ${e.username}</span><span class="lb-tiles">${e.tiles}</span></div>`)
+    .join('');
+}
+
+// ─── Show UI once loaded ─────────────────────────────────────────────────────
+function showUI() {
+  document.getElementById('loading').style.display     = 'none';
+  document.getElementById('hud').style.display          = 'flex';
+  document.getElementById('leaderboard').style.display  = 'block';
+  document.getElementById('legend').style.display       = 'flex';
+}
+
+// ─── Message bus (Devvit → game) ─────────────────────────────────────────────
+window.addEventListener('message', (event) => {
+  // Devvit wraps messages differently depending on the build; handle both
+  const raw = event.data;
+  const msg = raw?.data?.message ?? raw?.message ?? raw;
+  if (!msg || !msg.type) return;
+
+  switch (msg.type) {
+    case 'INIT_RESPONSE': {
+      gameState.board       = msg.board;
+      gameState.username    = msg.username;
+      gameState.actionsLeft = msg.actionsLeft;
+      gameState.leaderboard = msg.leaderboard ?? [];
+      updateHUD();
+      updateLeaderboard();
+      const scene = game.scene.getScene('GameScene');
+      if (scene?.sys.isActive()) scene.applyUpdate(msg.board);
+      showUI();
+      break;
+    }
+    case 'UPDATE': {
+      gameState.board       = msg.board;
+      gameState.actionsLeft = msg.actionsLeft;
+      gameState.leaderboard = msg.leaderboard ?? [];
+      updateHUD();
+      updateLeaderboard();
+      const scene = game.scene.getScene('GameScene');
+      if (scene?.sys.isActive()) scene.applyUpdate(msg.board);
+      showToast('Board updated! ✅');
+      break;
+    }
+    case 'ERROR': {
+      showToast(`⚠ ${msg.message}`);
+      break;
+    }
+  }
+});
+
+// Delay (ms) before requesting init state — gives the Devvit postMessage bridge
+// time to finish establishing its channel after the webview iframe loads.
+const DEVVIT_BRIDGE_INIT_DELAY_MS = 300;
+
+// ─── Ask Devvit for initial state once page is ready ─────────────────────────
+window.addEventListener('load', () => {
+  setTimeout(() => sendToDevvit({ type: 'INIT' }), DEVVIT_BRIDGE_INIT_DELAY_MS);
+});
+</script>
+</body>
+</html>
