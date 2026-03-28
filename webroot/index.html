@@ -767,6 +767,9 @@ window.addEventListener('message', (event) => {
 
   switch (msg.type) {
     case 'INIT_RESPONSE': {
+      _initReceived = true;
+      clearTimeout(_initRetryTimer);
+
       gameState.board       = msg.board;
       gameState.username    = msg.username;
       gameState.actionsLeft = msg.actionsLeft;
@@ -802,6 +805,16 @@ window.addEventListener('message', (event) => {
       updateLeaderboard();
       updateAchievementsBadges();
 
+      // Show achievement popups for any newly unlocked achievements.
+      if (msg.achievements && msg.achievements.length > 0) {
+        msg.achievements.forEach((ach, idx) => {
+          setTimeout(() => {
+            showAchievementPopup(ach);
+            showToast(`🏆 Achievement: ${ach.name}!`, 3000);
+          }, idx * ACHIEVEMENT_POPUP_STAGGER_MS);
+        });
+      }
+
       const scene = game.scene.getScene('GameScene');
       if (scene?.sys.isActive()) scene.applyUpdate(msg.board);
       showToast('Board updated! ✅');
@@ -834,10 +847,31 @@ window.addEventListener('message', (event) => {
 // Delay (ms) before requesting init state — gives the Devvit postMessage bridge
 // time to finish establishing its channel after the webview iframe loads.
 const DEVVIT_BRIDGE_INIT_DELAY_MS = 300;
+// How long to wait for INIT_RESPONSE before retrying (exponential backoff, ms).
+const INIT_RETRY_BASE_MS  = 1000;
+const INIT_RETRY_MAX_MS   = 8000;
+// Stagger between consecutive achievement popup animations (ms).
+const ACHIEVEMENT_POPUP_STAGGER_MS = 1200;
 
 // ─── Ask Devvit for initial state once page is ready ─────────────────────────
+let _initReceived = false;
+let _initRetryTimer = null;
+let _initRetryDelay = INIT_RETRY_BASE_MS;
+
+function _sendInit() {
+  sendToDevvit({ type: 'INIT' });
+  // Schedule a retry with exponential backoff in case the message or its response was dropped.
+  clearTimeout(_initRetryTimer);
+  _initRetryTimer = setTimeout(() => {
+    if (!_initReceived) {
+      _initRetryDelay = Math.min(_initRetryDelay * 2, INIT_RETRY_MAX_MS);
+      _sendInit();
+    }
+  }, _initRetryDelay);
+}
+
 window.addEventListener('load', () => {
-  setTimeout(() => sendToDevvit({ type: 'INIT' }), DEVVIT_BRIDGE_INIT_DELAY_MS);
+  setTimeout(_sendInit, DEVVIT_BRIDGE_INIT_DELAY_MS);
 });
 </script>
 </body>
