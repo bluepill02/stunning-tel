@@ -14,6 +14,8 @@
 
 import {
   Devvit,
+  SettingScope,
+  useChannel,
   useState,
   useWebView,
 } from "@devvit/public-api";
@@ -23,6 +25,7 @@ const COLS = 30;
 const ROWS = 20;
 const DAILY_ACTIONS = 5;
 const BOARD_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
+const THREADFRONT_DAILY_TICK_JOB = 'threadfront_daily_tick';
 
 // ─── Type helpers ────────────────────────────────────────────────────────────
 type Cell = { owner: string | null; fort: boolean };
@@ -31,6 +34,7 @@ type Board = Cell[][];
 type DevvitMsg =
   | { type: "INIT_RESPONSE"; board: Board; username: string; actionsLeft: number; leaderboard: LeaderEntry[] }
   | { type: "UPDATE"; board: Board; actionsLeft: number; leaderboard: LeaderEntry[] }
+  | { type: "BOARD_UPDATE"; board: Board; leaderboard: LeaderEntry[] }
   | { type: "ERROR"; message: string };
 
 type WebMsg =
@@ -41,12 +45,130 @@ type WebMsg =
 
 type LeaderEntry = { username: string; tiles: number };
 
+type SectorRealtimeMsg = { type: 'BOARD_UPDATE'; board: Board; leaderboard: LeaderEntry[] };
+
+// ─── Threadfront (campaign season) helpers ───────────────────────────────────
+type PostKind = 'SECTOR' | 'HQ';
+
+type SectorInfo = {
+  postId: string;
+  title: string;
+  createdAt: number; // epoch millis
+};
+
+type ActiveSeason = {
+  seasonId: string;
+  startedAt: number; // epoch millis
+  hqPostId: string;
+  sectors: SectorInfo[];
+  tickJobId?: string;
+  lastTickAt?: number;
+};
+
 // ─── Redis helpers ────────────────────────────────────────────────────────────
 function boardKey(postId: string) { return `subrwar:board:${postId}`; }
 function actionsKey(postId: string, username: string, day: string) {
   return `subrwar:actions:${postId}:${username}:${day}`;
 }
 function leaderKey(postId: string) { return `subrwar:leader:${postId}`; }
+function postKindKey(postId: string) { return `subrwar:postkind:${postId}`; }
+function activeSeasonKey(subredditId: string) { return `subrwar:season:active:${subredditId}`; }
+function sectorSeasonKey(postId: string) { return `subrwar:sector:season:${postId}`; }
+function seasonLeaderKey(subredditId: string) { return `subrwar:season:leader:${subredditId}`; }
+function seasonTickJobKey(subredditId: string) { return `subrwar:season:tickJob:${subredditId}`; }
+
+function newId(prefix: string): string {
+  const t = Date.now().toString(36);
+  const r = Math.random().toString(36).slice(2, 8);
+  return `${prefix}_${t}_${r}`;
+}
+
+async function loadActiveSeason(
+  redis: Devvit.Context['redis'],
+  subredditId: string
+): Promise<ActiveSeason | null> {
+  const raw = await redis.get(activeSeasonKey(subredditId));
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as ActiveSeason;
+  } catch {
+    return null;
+  }
+}
+
+async function saveActiveSeason(
+  redis: Devvit.Context['redis'],
+  subredditId: string,
+  season: ActiveSeason
+): Promise<void> {
+  await redis.set(activeSeasonKey(subredditId), JSON.stringify(season));
+}
+
+async function loadSeasonLeaderboard(
+  redis: Devvit.Context['redis'],
+  subredditId: string
+): Promise<LeaderEntry[]> {
+  const raw = await redis.get(seasonLeaderKey(subredditId));
+  if (!raw) return [];
+  try {
+    return JSON.parse(raw) as LeaderEntry[];
+  } catch {
+    return [];
+  }
+}
+
+async function runSeasonTick(
+  redis: Devvit.Context['redis'],
+  subredditId: string
+): Promise<{ season: ActiveSeason; leaderboard: LeaderEntry[] } | null> {
+  const season = await loadActiveSeason(redis, subredditId);
+  if (!season) return null;
+
+  // Aggregate tiles across all active sectors for a season-level leaderboard.
+  const totals: Record<string, number> = {};
+  for (const sector of season.sectors) {
+    const board = await loadBoard(redis, sector.postId);
+    for (const row of board) {
+      for (const cell of row) {
+        if (cell.owner) totals[cell.owner] = (totals[cell.owner] ?? 0) + 1;
+      }
+    }
+  }
+
+  const seasonLeaderboard: LeaderEntry[] = Object.entries(totals)
+    .map(([username, tiles]) => ({ username, tiles }))
+    .sort((a, b) => b.tiles - a.tiles)
+    .slice(0, 10);
+
+  await redis.set(seasonLeaderKey(subredditId), JSON.stringify(seasonLeaderboard));
+  const updated: ActiveSeason = { ...season, lastTickAt: Date.now() };
+  await saveActiveSeason(redis, subredditId, updated);
+
+  return { season: updated, leaderboard: seasonLeaderboard };
+}
+
+async function getPostKind(
+  redis: Devvit.Context['redis'],
+  subredditId: string,
+  postId: string
+): Promise<PostKind> {
+  const raw = await redis.get(postKindKey(postId));
+  if (raw === 'HQ' || raw === 'SECTOR') return raw;
+
+  // Fallback: if this post is the HQ for the active season, treat it as HQ.
+  const season = await loadActiveSeason(redis, subredditId);
+  if (season?.hqPostId === postId) return 'HQ';
+
+  return 'SECTOR';
+}
+
+async function setPostKind(
+  redis: Devvit.Context['redis'],
+  postId: string,
+  kind: PostKind
+): Promise<void> {
+  await redis.set(postKindKey(postId), kind);
+}
 
 function utcDay(): string {
   return new Date().toISOString().slice(0, 10); // "YYYY-MM-DD"
@@ -112,10 +234,38 @@ async function updateLeaderboard(redis: Devvit.Context["redis"], postId: string,
 }
 
 // ─── Devvit configuration ─────────────────────────────────────────────────────
-Devvit.configure({
+type DevvitConfig = Parameters<typeof Devvit.configure>[0];
+type DevvitConfigWithScheduler = DevvitConfig & { scheduler?: boolean };
+
+const devvitConfig: DevvitConfigWithScheduler = {
   redditAPI: true,
   redis: true,
   realtime: true,
+  // `scheduler` is supported at runtime but missing from this public-api version's typings.
+  scheduler: true,
+};
+
+Devvit.configure(devvitConfig);
+Devvit.addSettings([
+  {
+    type: 'string',
+    name: 'subrwar_subreddit_name_override',
+    label: 'Subreddit name override (optional)',
+    helpText: 'If set, menu actions will post to this subreddit name instead of using the current context.',
+    scope: SettingScope.Installation,
+  },
+]);
+
+Devvit.addSchedulerJob<{ subredditId: string }>({
+  name: THREADFRONT_DAILY_TICK_JOB,
+  onRun: async (event, context) => {
+    const subredditId = event.data?.subredditId ?? context.subredditId;
+    const result = await runSeasonTick(context.redis, subredditId);
+    if (!result) return;
+    console.log(
+      `[Threadfront] Daily tick complete for ${subredditId} (season ${result.season.seasonId})`
+    );
+  },
 });
 
 // ─── Custom post type ─────────────────────────────────────────────────────────
@@ -125,7 +275,20 @@ Devvit.addCustomPostType({
   height: "tall",
 
   render: (context) => {
-    const { redis, postId, userId } = context;
+    const { redis, postId, userId, subredditId } = context;
+
+    const [activeSeason, setActiveSeason] = useState<ActiveSeason | null>(async () => {
+      return await loadActiveSeason(redis, subredditId);
+    });
+
+    const [seasonLeaderboard, setSeasonLeaderboard] = useState<LeaderEntry[]>(async () => {
+      return await loadSeasonLeaderboard(redis, subredditId);
+    });
+
+    const [postKind] = useState<PostKind>(async () => {
+      if (!postId) return 'SECTOR';
+      return await getPostKind(redis, subredditId, postId);
+    });
 
     const [username] = useState<string>(async () => {
       if (!userId) return "anonymous";
@@ -220,10 +383,209 @@ Devvit.addCustomPostType({
         ]);
 
         webView.postMessage({ type: "UPDATE", board, actionsLeft, leaderboard });
+
+        // Broadcast board updates to other viewers of this sector.
+        try {
+          await channel.send({ type: 'BOARD_UPDATE', board, leaderboard });
+        } catch (e) {
+          // Realtime might not be connected yet; the initiating user still received UPDATE.
+          console.warn('Realtime broadcast skipped:', e);
+        }
       },
 
       onUnmount() {},
     });
+
+    const channel = useChannel<SectorRealtimeMsg>({
+      name: postId ? `sector_${postId}` : 'sector_unknown',
+      onMessage: (msg) => {
+        if (!msg || msg.type !== 'BOARD_UPDATE') return;
+        webView.postMessage({
+          type: 'BOARD_UPDATE',
+          board: msg.board,
+          leaderboard: msg.leaderboard,
+        });
+      },
+    });
+    channel.subscribe();
+
+    if (postKind === 'HQ') {
+      return (
+        <vstack height="100%" width="100%" padding="medium" gap="medium">
+          {/* Header */}
+          <vstack gap="small">
+            <text size="xxlarge" weight="bold">🧭 Threadfront HQ</text>
+            <text size="small" color="#999">Subreddit: r/{context.subredditName ?? '(unknown)'}</text>
+          </vstack>
+
+          {activeSeason ? (
+            <vstack gap="medium">
+              {/* Season Info Panel */}
+              <vstack gap="small" backgroundColor="#1a1a2e" padding="small" cornerRadius="medium">
+                <text weight="bold" color="#e94560">Season Info</text>
+                <text size="small">
+                  ID: <text color="#888">{activeSeason.seasonId.substring(0, 12)}...</text>
+                </text>
+                <text size="small">
+                  Started: <text color="#888">{new Date(activeSeason.startedAt).toLocaleString()}</text>
+                </text>
+                <text size="small">
+                  Last Aggregation: <text color="#888">{activeSeason.lastTickAt ? new Date(activeSeason.lastTickAt).toLocaleString() : 'pending'}</text>
+                </text>
+              </vstack>
+
+              {/* Action Buttons */}
+              <vstack gap="small">
+                <button
+                  appearance="primary"
+                  size="large"
+                  onPress={async () => {
+                    try {
+                      const season = await loadActiveSeason(redis, subredditId);
+                      if (!season) {
+                        context.ui.showToast('No active season found. Start a season from the subreddit menu.');
+                        return;
+                      }
+
+                      const subredditName =
+                        context.subredditName ??
+                        (await context.settings.get<string>('subrwar_subreddit_name_override'));
+                      if (!subredditName) {
+                        context.ui.showToast('Missing subreddit name. Configure the subreddit override setting.');
+                        return;
+                      }
+
+                      const sectorNumber = season.sectors.length + 1;
+                      const title = `⚔️ Sector ${sectorNumber} – Subrwar Battle`;
+                      const sectorPost = await context.reddit.submitPost({
+                        title,
+                        subredditName,
+                        preview: (
+                          <vstack height="100%" width="100%" alignment="center middle" backgroundColor="#1a1a2e">
+                            <text color="white" size="xlarge" weight="bold">⚔️ SUBRWAR</text>
+                            <text color="#e0e0e0" size="medium">Loading battle map…</text>
+                          </vstack>
+                        ),
+                        textFallback: {
+                          text: 'Subrwar battle sector (open in the app to play).',
+                        },
+                      });
+
+                      await setPostKind(redis, sectorPost.id, 'SECTOR');
+                      await redis.set(sectorSeasonKey(sectorPost.id), season.seasonId);
+
+                      const updated: ActiveSeason = {
+                        ...season,
+                        sectors: [
+                          ...season.sectors,
+                          { postId: sectorPost.id, title, createdAt: Date.now() },
+                        ],
+                      };
+                      await saveActiveSeason(redis, subredditId, updated);
+                      setActiveSeason(updated);
+
+                      context.ui.showToast('Sector created!');
+                    } catch (e) {
+                      console.error('Failed to create sector', e);
+                      context.ui.showToast('Failed to create sector.');
+                    }
+                  }}
+                >
+                  ⚔️ Create Sector Battle
+                </button>
+
+                <hstack gap="small">
+                  <button
+                    onPress={async () => {
+                      try {
+                        const result = await runSeasonTick(redis, subredditId);
+                        if (!result) {
+                          context.ui.showToast('No active season found.');
+                          return;
+                        }
+                        setActiveSeason(result.season);
+                        setSeasonLeaderboard(result.leaderboard);
+                        context.ui.showToast('Season leaderboard aggregated.');
+                      } catch (e) {
+                        console.error('Failed to run season tick', e);
+                        context.ui.showToast('Aggregation failed.');
+                      }
+                    }}
+                  >
+                    📊 Aggregate
+                  </button>
+
+                  <button
+                    onPress={async () => {
+                      const [season, leaders] = await Promise.all([
+                        loadActiveSeason(redis, subredditId),
+                        loadSeasonLeaderboard(redis, subredditId),
+                      ]);
+                      setActiveSeason(season);
+                      setSeasonLeaderboard(leaders);
+                      context.ui.showToast('Refreshed');
+                    }}
+                  >
+                    🔄 Refresh
+                  </button>
+                </hstack>
+              </vstack>
+
+              {/* Season Leaderboard */}
+              <vstack gap="small">
+                <text weight="bold">🏆 Season Leaders</text>
+                {seasonLeaderboard.length === 0 ? (
+                  <text size="small" color="#999">No data. Create sectors and run aggregation.</text>
+                ) : (
+                  <vstack gap="none">
+                    {seasonLeaderboard.map((e, idx) => (
+                      <hstack key={e.username} gap="small">
+                        <text size="small" weight="bold" color={idx === 0 ? '#FFD700' : idx === 1 ? '#C0C0C0' : '#CD7F32'}>
+                          #{idx + 1}
+                        </text>
+                        <spacer />
+                        <text size="small">{e.username}</text>
+                        <text size="small" weight="bold" color="#4cc9f0">{e.tiles} tiles</text>
+                      </hstack>
+                    ))}
+                  </vstack>
+                )}
+              </vstack>
+
+              {/* Active Sectors */}
+              <vstack gap="small">
+                <text weight="bold">⚔️ Active Sectors ({activeSeason.sectors.length})</text>
+                {activeSeason.sectors.length === 0 ? (
+                  <text size="small" color="#999">None yet. Create your first battle sector above.</text>
+                ) : (
+                  <vstack gap="small">
+                    {activeSeason.sectors.map((s, idx) => (
+                      <vstack key={s.postId} gap="small" backgroundColor="#0a0a14" padding="small" cornerRadius="small">
+                        <text size="small" weight="bold">{idx + 1}. {s.title}</text>
+                        <text size="small" color="#888">{s.postId}</text>
+                      </vstack>
+                    ))}
+                  </vstack>
+                )}
+              </vstack>
+            </vstack>
+          ) : (
+            <vstack gap="small" alignment="center middle">
+              <text color="#e94560">⚠️ No Active Season</text>
+              <text size="small" color="#999">Use "Start Threadfront HQ (Season)" from the subreddit menu to begin.</text>
+              <button
+                onPress={async () => {
+                  const season = await loadActiveSeason(redis, subredditId);
+                  setActiveSeason(season);
+                }}
+              >
+                Check Again
+              </button>
+            </vstack>
+          )}
+        </vstack>
+      );
+    }
 
     return (
       <vstack height="100%" width="100%" alignment="center middle">
@@ -244,18 +606,133 @@ Devvit.addMenuItem({
   label: "Start a Subrwar Game",
   location: "subreddit",
   async onPress(event, context) {
-    const subreddit = await context.reddit.getCurrentSubreddit();
-    await context.reddit.submitPost({
-      title: `⚔️ Subrwar – Conquer the Grid! [${new Date().toLocaleDateString()}]`,
-      subredditName: subreddit.name,
-      preview: (
-        <vstack height="100%" width="100%" alignment="center middle" backgroundColor="#1a1a2e">
-          <text color="white" size="xlarge" weight="bold">⚔️ SUBRWAR</text>
-          <text color="#e0e0e0" size="medium">Loading battle map…</text>
-        </vstack>
-      ),
-    });
-    context.ui.showToast("Subrwar game created! 🎮");
+    const subredditName =
+      context.subredditName ??
+      (await context.settings.get<string>('subrwar_subreddit_name_override'));
+    if (!subredditName) {
+      console.warn('Could not determine subredditName for menu action', {
+        event,
+        context: {
+          subredditName: context.subredditName,
+          subredditId: context.subredditId,
+        },
+      });
+      context.ui.showToast('Could not determine subreddit. Please configure the subreddit override setting.');
+      return;
+    }
+
+    try {
+      const post = await context.reddit.submitPost({
+        title: `⚔️ Subrwar – Conquer the Grid! [${new Date().toLocaleDateString()}]`,
+        subredditName,
+        preview: (
+          <vstack height="100%" width="100%" alignment="center middle" backgroundColor="#1a1a2e">
+            <text color="white" size="xlarge" weight="bold">⚔️ SUBRWAR</text>
+            <text color="#e0e0e0" size="medium">Loading battle map…</text>
+          </vstack>
+        ),
+        textFallback: {
+          text: 'Subrwar battle sector (open in the app to play).',
+        },
+      });
+
+      await setPostKind(context.redis, post.id, 'SECTOR');
+
+      const season = await loadActiveSeason(context.redis, context.subredditId);
+      if (season) {
+        await context.redis.set(sectorSeasonKey(post.id), season.seasonId);
+        const updated: ActiveSeason = {
+          ...season,
+          sectors: [
+            ...season.sectors,
+            { postId: post.id, title: post.title, createdAt: Date.now() },
+          ],
+        };
+        await saveActiveSeason(context.redis, context.subredditId, updated);
+        context.ui.showToast('Sector created and added to Threadfront.');
+      } else {
+        context.ui.showToast("Subrwar game created! 🎮");
+      }
+    } catch (e) {
+      console.error("Error creating post:", e);
+      context.ui.showToast("Error: Could not create post. Try again!");
+    }
+  },
+});
+
+Devvit.addMenuItem({
+  label: 'Start Threadfront HQ (Season)',
+  location: 'subreddit',
+  async onPress(event, context) {
+    const subredditName =
+      context.subredditName ??
+      (await context.settings.get<string>('subrwar_subreddit_name_override'));
+    if (!subredditName) {
+      console.warn('Could not determine subredditName for menu action', {
+        event,
+        context: context.toJSON(),
+      });
+      context.ui.showToast('Could not determine subreddit. Please configure the subreddit override setting.');
+      return;
+    }
+
+    try {
+      const existing = await loadActiveSeason(context.redis, context.subredditId);
+      if (existing) {
+        context.ui.showToast(`Season already active. HQ: ${existing.hqPostId}`);
+        return;
+      }
+
+      const seasonId = newId('season');
+      const hqPost = await context.reddit.submitPost({
+        title: `🧭 Threadfront HQ – Season ${seasonId}`,
+        subredditName,
+        preview: (
+          <vstack height="100%" width="100%" alignment="center middle" backgroundColor="#0b1320">
+            <text color="white" size="xlarge" weight="bold">🧭 THREADFRONT HQ</text>
+            <text color="#b8c0cc" size="medium">Open to create sectors and coordinate the war.</text>
+          </vstack>
+        ),
+        textFallback: {
+          text: 'Threadfront HQ (open the post in the app to create new sectors and manage the campaign).',
+        },
+      });
+
+      await setPostKind(context.redis, hqPost.id, 'HQ');
+
+      let season: ActiveSeason = {
+        seasonId,
+        startedAt: Date.now(),
+        hqPostId: hqPost.id,
+        sectors: [],
+      };
+      await saveActiveSeason(context.redis, context.subredditId, season);
+
+      try {
+        const tickJobId = await context.scheduler.runJob({
+          name: THREADFRONT_DAILY_TICK_JOB,
+          // Run daily at 00:05 UTC.
+          cron: '5 0 * * *',
+          data: { subredditId: context.subredditId },
+        });
+        await context.redis.set(seasonTickJobKey(context.subredditId), tickJobId);
+        season = { ...season, tickJobId };
+        await saveActiveSeason(context.redis, context.subredditId, season);
+      } catch (e) {
+        console.warn('Failed to schedule daily Threadfront tick job.', e);
+      }
+
+      try {
+        await hqPost.sticky(1);
+      } catch (e) {
+        console.warn('Failed to sticky Threadfront HQ post (missing modposts permission or mod status).', e);
+      }
+
+      context.ui.showToast('Threadfront HQ created!');
+    } catch (e) {
+      console.error('Error creating Threadfront HQ:', e);
+      context.ui.showToast('Error: Could not create Threadfront HQ.');
+    }
   },
 });
 

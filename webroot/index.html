@@ -180,10 +180,8 @@
 
 <script>
 // ─── Devvit bridge ───────────────────────────────────────────────────────────
-const DEVVIT_READY_MSG = 'devvit-message';
-
 function sendToDevvit(msg) {
-  window.parent?.postMessage({ type: 'devvit-message', data: { message: msg } }, '*');
+  window.parent?.postMessage(msg, '*');
 }
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -459,6 +457,16 @@ window.addEventListener('message', (event) => {
       const scene = game.scene.getScene('GameScene');
       if (scene?.sys.isActive()) scene.applyUpdate(msg.board);
       showToast('Board updated! ✅');
+      break;
+    }
+    case 'BOARD_UPDATE': {
+      // Realtime updates from other players: update shared state, but do not
+      // overwrite this viewer's per-user actionsLeft.
+      gameState.board       = msg.board;
+      gameState.leaderboard = msg.leaderboard ?? gameState.leaderboard ?? [];
+      updateLeaderboard();
+      const scene = game.scene.getScene('GameScene');
+      if (scene?.sys.isActive()) scene.applyUpdate(msg.board);
       break;
     }
     case 'ERROR': {

@@ -1,2 +1,7 @@
 name: subrwar
 version: 0.0.1
+permissions:
+  - read
+  - submit
+  - modposts
+
