@@ -228,6 +228,13 @@ function emptyBoard(): Board {
   );
 }
 
+function isValidCell(col: unknown, row: unknown): col is number {
+  return (
+    typeof col === 'number' && typeof row === 'number' &&
+    col >= 0 && col < COLS && row >= 0 && row < ROWS
+  );
+}
+
 // ─── Achievement definitions ──────────────────────────────────────────────────
 const ACHIEVEMENTS: Achievement[] = [
   { id: 'first_claim', name: 'First Blood', description: 'Claim your first territory', icon: '🚩' },
@@ -244,35 +251,32 @@ const ACHIEVEMENTS: Achievement[] = [
 ];
 
 // ─── Player stats helpers ─────────────────────────────────────────────────────
+function defaultPlayerStats(): PlayerStats {
+  return {
+    totalTilesClaimed: 0,
+    totalAttacks: 0,
+    totalFortifications: 0,
+    longestStreak: 0,
+    currentStreak: 0,
+    lastLoginDate: '',
+    achievements: [],
+    powerUpsUsed: 0,
+    karmaEarned: 0,
+  };
+}
+
 async function loadPlayerStats(redis: Devvit.Context['redis'], username: string): Promise<PlayerStats> {
   const raw = await redis.get(playerStatsKey(username));
-  if (!raw) {
-    return {
-      totalTilesClaimed: 0,
-      totalAttacks: 0,
-      totalFortifications: 0,
-      longestStreak: 0,
-      currentStreak: 0,
-      lastLoginDate: '',
-      achievements: [],
-      powerUpsUsed: 0,
-      karmaEarned: 0,
-    };
-  }
+  if (!raw) return defaultPlayerStats();
   try {
-    return JSON.parse(raw) as PlayerStats;
+    const stats = JSON.parse(raw) as PlayerStats;
+    // Backward-compatibility: older data may not have these fields.
+    if (!Array.isArray(stats.achievements)) stats.achievements = [];
+    if (typeof stats.powerUpsUsed !== 'number') stats.powerUpsUsed = 0;
+    if (typeof stats.karmaEarned !== 'number') stats.karmaEarned = 0;
+    return stats;
   } catch {
-    return {
-      totalTilesClaimed: 0,
-      totalAttacks: 0,
-      totalFortifications: 0,
-      longestStreak: 0,
-      currentStreak: 0,
-      lastLoginDate: '',
-      achievements: [],
-      powerUpsUsed: 0,
-      karmaEarned: 0,
-    };
+    return defaultPlayerStats();
   }
 }
 
@@ -352,6 +356,11 @@ async function checkAchievements(
         break;
       case 'alliance_member':
         unlock = !!stats.allianceId;
+        break;
+      case 'alliance_leader':
+        // Unlocked explicitly when the player creates an alliance;
+        // not derivable from stats alone, so always false here.
+        unlock = false;
         break;
     }
 
@@ -496,121 +505,140 @@ Devvit.addCustomPostType({
       async onMessage(msg, webView) {
         if (!postId) return;
 
-        if (msg.type === "INIT") {
+        try {
+          if (msg.type === "INIT") {
+            let stats = await loadPlayerStats(redis, username);
+            stats = await updateStreak(redis, username, stats);
+            await savePlayerStats(redis, username, stats);
+
+            const [board, actionsLeft, leaderboard] = await Promise.all([
+              loadBoard(redis, postId),
+              getActionsLeft(redis, postId, username),
+              getLeaderboard(redis, postId),
+            ]);
+
+            const newAchievements = await checkAchievements(redis, username, stats, board);
+
+            webView.postMessage({
+              type: "INIT_RESPONSE",
+              board,
+              username,
+              actionsLeft,
+              leaderboard,
+              stats,
+              achievements: newAchievements,
+            });
+            return;
+          }
+
+          // Power-up handler (stub – sends error for now)
+          if (msg.type === "USE_POWERUP") {
+            webView.postMessage({ type: "ERROR", message: "Power-ups coming soon!" });
+            return;
+          }
+
+          // Alliance handlers (stub – sends error for now)
+          if (msg.type === "JOIN_ALLIANCE" || msg.type === "CREATE_ALLIANCE") {
+            webView.postMessage({ type: "ERROR", message: "Alliances coming soon!" });
+            return;
+          }
+
+          // All mutating cell actions share the same flow
+          const { col, row } = msg as { type: string; col: number; row: number };
+          if (!isValidCell(col, row)) {
+            webView.postMessage({ type: "ERROR", message: "Out of bounds." });
+            return;
+          }
+
+          const board = await loadBoard(redis, postId);
+          const cell = board[row][col];
           let stats = await loadPlayerStats(redis, username);
-          stats = await updateStreak(redis, username, stats);
+
+          if (msg.type === "CLAIM") {
+            if (cell.owner !== null) {
+              webView.postMessage({ type: "ERROR", message: "Cell already owned." });
+              return;
+            }
+            if (!(await consumeAction(redis, postId, username))) {
+              webView.postMessage({ type: "ERROR", message: "No actions left today." });
+              return;
+            }
+            board[row][col] = { owner: username, fort: false };
+            stats.totalTilesClaimed += 1;
+            stats.karmaEarned += 1;
+          } else if (msg.type === "ATTACK") {
+            if (!cell.owner || cell.owner === username) {
+              webView.postMessage({ type: "ERROR", message: "Nothing to attack." });
+              return;
+            }
+            if (cell.shield && cell.shieldExpiry && cell.shieldExpiry > Date.now()) {
+              webView.postMessage({ type: "ERROR", message: "Cell is shielded!" });
+              return;
+            }
+            if (!(await consumeAction(redis, postId, username))) {
+              webView.postMessage({ type: "ERROR", message: "No actions left today." });
+              return;
+            }
+            if (cell.fort) {
+              // First hit removes fort
+              board[row][col] = { owner: cell.owner, fort: false };
+            } else {
+              // Second hit (or unfortified) captures the cell
+              board[row][col] = { owner: username, fort: false };
+              stats.totalTilesClaimed += 1;
+            }
+            stats.totalAttacks += 1;
+            stats.karmaEarned += 2;
+          } else if (msg.type === "FORTIFY") {
+            if (cell.owner !== username) {
+              webView.postMessage({ type: "ERROR", message: "You don't own this cell." });
+              return;
+            }
+            if (cell.fort) {
+              webView.postMessage({ type: "ERROR", message: "Already fortified." });
+              return;
+            }
+            if (!(await consumeAction(redis, postId, username))) {
+              webView.postMessage({ type: "ERROR", message: "No actions left today." });
+              return;
+            }
+            board[row][col] = { owner: username, fort: true };
+            stats.totalFortifications += 1;
+            stats.karmaEarned += 1;
+          }
+
+          await saveBoard(redis, postId, board);
+          await updateLeaderboard(redis, postId, board);
           await savePlayerStats(redis, username, stats);
 
-          const [board, actionsLeft, leaderboard] = await Promise.all([
-            loadBoard(redis, postId),
+          const newAchievements = await checkAchievements(redis, username, stats, board);
+
+          const [actionsLeft, leaderboard] = await Promise.all([
             getActionsLeft(redis, postId, username),
             getLeaderboard(redis, postId),
           ]);
 
-          const newAchievements = await checkAchievements(redis, username, stats, board);
+          webView.postMessage({ type: "UPDATE", board, actionsLeft, leaderboard, stats, achievements: newAchievements });
 
-          webView.postMessage({
-            type: "INIT_RESPONSE",
-            board,
-            username,
-            actionsLeft,
-            leaderboard,
-            stats,
-            achievements: newAchievements,
-          });
-          return;
-        }
-
-        // All mutating actions share the same flow
-        const { col, row } = msg as { type: string; col: number; row: number };
-        if (col < 0 || col >= COLS || row < 0 || row >= ROWS) {
-          webView.postMessage({ type: "ERROR", message: "Out of bounds." });
-          return;
-        }
-
-        const board = await loadBoard(redis, postId);
-        const cell = board[row][col];
-        let stats = await loadPlayerStats(redis, username);
-
-        if (msg.type === "CLAIM") {
-          if (cell.owner !== null) {
-            webView.postMessage({ type: "ERROR", message: "Cell already owned." });
-            return;
-          }
-          if (!(await consumeAction(redis, postId, username))) {
-            webView.postMessage({ type: "ERROR", message: "No actions left today." });
-            return;
-          }
-          board[row][col] = { owner: username, fort: false };
-          stats.totalTilesClaimed += 1;
-          stats.karmaEarned += 1;
-        } else if (msg.type === "ATTACK") {
-          if (!cell.owner || cell.owner === username) {
-            webView.postMessage({ type: "ERROR", message: "Nothing to attack." });
-            return;
-          }
-          if (cell.shield && cell.shieldExpiry && cell.shieldExpiry > Date.now()) {
-            webView.postMessage({ type: "ERROR", message: "Cell is shielded!" });
-            return;
-          }
-          if (!(await consumeAction(redis, postId, username))) {
-            webView.postMessage({ type: "ERROR", message: "No actions left today." });
-            return;
-          }
-          if (cell.fort) {
-            // First hit removes fort
-            board[row][col] = { owner: cell.owner, fort: false };
-          } else {
-            // Second hit (or unfortified) captures the cell
-            board[row][col] = { owner: username, fort: false };
-            stats.totalTilesClaimed += 1;
-          }
-          stats.totalAttacks += 1;
-          stats.karmaEarned += 2;
-        } else if (msg.type === "FORTIFY") {
-          if (cell.owner !== username) {
-            webView.postMessage({ type: "ERROR", message: "You don't own this cell." });
-            return;
-          }
-          if (cell.fort) {
-            webView.postMessage({ type: "ERROR", message: "Already fortified." });
-            return;
-          }
-          if (!(await consumeAction(redis, postId, username))) {
-            webView.postMessage({ type: "ERROR", message: "No actions left today." });
-            return;
-          }
-          board[row][col] = { owner: username, fort: true };
-          stats.totalFortifications += 1;
-          stats.karmaEarned += 1;
-        }
-
-        await saveBoard(redis, postId, board);
-        await updateLeaderboard(redis, postId, board);
-        await savePlayerStats(redis, username, stats);
-
-        const newAchievements = await checkAchievements(redis, username, stats, board);
-
-        const [actionsLeft, leaderboard] = await Promise.all([
-          getActionsLeft(redis, postId, username),
-          getLeaderboard(redis, postId),
-        ]);
-
-        webView.postMessage({ type: "UPDATE", board, actionsLeft, leaderboard, stats, achievements: newAchievements });
-
-        // Send achievement notifications
-        for (const achievement of newAchievements) {
-          setTimeout(() => {
+          // Send achievement notifications immediately (server-side setTimeout is unreliable).
+          for (const achievement of newAchievements) {
             webView.postMessage({ type: "ACHIEVEMENT_UNLOCKED", achievement });
-          }, 500);
-        }
+          }
 
-        // Broadcast board updates to other viewers of this sector.
-        try {
-          await channel.send({ type: 'BOARD_UPDATE', board, leaderboard });
+          // Broadcast board updates to other viewers of this sector.
+          try {
+            await channel.send({ type: 'BOARD_UPDATE', board, leaderboard });
+          } catch (e) {
+            // Realtime might not be connected yet; the initiating user still received UPDATE.
+            console.warn('Realtime broadcast skipped:', e);
+          }
         } catch (e) {
-          // Realtime might not be connected yet; the initiating user still received UPDATE.
-          console.warn('Realtime broadcast skipped:', e);
+          console.error('Error in onMessage handler:', e);
+          try {
+            webView.postMessage({ type: "ERROR", message: "Server error. Please try again." });
+          } catch {
+            // best-effort
+          }
         }
       },
 
