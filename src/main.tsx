@@ -27,23 +27,63 @@ const DAILY_ACTIONS = 5;
 const BOARD_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 const THREADFRONT_DAILY_TICK_JOB = 'threadfront_daily_tick';
 
+// Power-up constants
+const POWERUP_NUKE_COST = 3; // Destroys 3x3 area
+const POWERUP_SHIELD_COST = 2; // Protects 3x3 area for 24h
+const POWERUP_VISION_COST = 1; // Reveals enemy fort status in radius
+const POWERUP_RAPID_COST = 2; // +3 actions for 1 hour
+
 // ─── Type helpers ────────────────────────────────────────────────────────────
-type Cell = { owner: string | null; fort: boolean };
+type Cell = { owner: string | null; fort: boolean; shield?: boolean; shieldExpiry?: number };
 type Board = Cell[][];
 
+type PowerUp = 'NUKE' | 'SHIELD' | 'VISION' | 'RAPID';
+type Achievement = {
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+  unlockedAt?: number;
+};
+
+type PlayerStats = {
+  totalTilesClaimed: number;
+  totalAttacks: number;
+  totalFortifications: number;
+  longestStreak: number;
+  currentStreak: number;
+  lastLoginDate: string;
+  achievements: Achievement[];
+  allianceId?: string;
+  powerUpsUsed: number;
+  karmaEarned: number;
+};
+
+type Alliance = {
+  id: string;
+  name: string;
+  members: string[];
+  color: string;
+  createdAt: number;
+};
+
 type DevvitMsg =
-  | { type: "INIT_RESPONSE"; board: Board; username: string; actionsLeft: number; leaderboard: LeaderEntry[] }
-  | { type: "UPDATE"; board: Board; actionsLeft: number; leaderboard: LeaderEntry[] }
+  | { type: "INIT_RESPONSE"; board: Board; username: string; actionsLeft: number; leaderboard: LeaderEntry[]; stats: PlayerStats; achievements: Achievement[]; alliance?: Alliance }
+  | { type: "UPDATE"; board: Board; actionsLeft: number; leaderboard: LeaderEntry[]; stats: PlayerStats; achievements: Achievement[] }
   | { type: "BOARD_UPDATE"; board: Board; leaderboard: LeaderEntry[] }
-  | { type: "ERROR"; message: string };
+  | { type: "ERROR"; message: string }
+  | { type: "ACHIEVEMENT_UNLOCKED"; achievement: Achievement };
 
 type WebMsg =
   | { type: "INIT" }
   | { type: "CLAIM"; col: number; row: number }
   | { type: "ATTACK"; col: number; row: number }
-  | { type: "FORTIFY"; col: number; row: number };
+  | { type: "FORTIFY"; col: number; row: number }
+  | { type: "USE_POWERUP"; powerup: PowerUp; col: number; row: number }
+  | { type: "JOIN_ALLIANCE"; allianceId: string }
+  | { type: "CREATE_ALLIANCE"; name: string };
 
-type LeaderEntry = { username: string; tiles: number };
+type LeaderEntry = { username: string; tiles: number; alliance?: string };
 
 type SectorRealtimeMsg = { type: 'BOARD_UPDATE'; board: Board; leaderboard: LeaderEntry[] };
 
@@ -76,6 +116,14 @@ function activeSeasonKey(subredditId: string) { return `subrwar:season:active:${
 function sectorSeasonKey(postId: string) { return `subrwar:sector:season:${postId}`; }
 function seasonLeaderKey(subredditId: string) { return `subrwar:season:leader:${subredditId}`; }
 function seasonTickJobKey(subredditId: string) { return `subrwar:season:tickJob:${subredditId}`; }
+
+// New Redis keys for engagement features
+function playerStatsKey(username: string) { return `subrwar:stats:${username}`; }
+function allianceKey(allianceId: string) { return `subrwar:alliance:${allianceId}`; }
+function alliancesListKey() { return `subrwar:alliances:list`; }
+function playerAllianceKey(username: string) { return `subrwar:player:alliance:${username}`; }
+function streakKey(username: string) { return `subrwar:streak:${username}`; }
+function achievementsKey(username: string) { return `subrwar:achievements:${username}`; }
 
 function newId(prefix: string): string {
   const t = Date.now().toString(36);
@@ -178,6 +226,148 @@ function emptyBoard(): Board {
   return Array.from({ length: ROWS }, () =>
     Array.from({ length: COLS }, () => ({ owner: null, fort: false }))
   );
+}
+
+// ─── Achievement definitions ──────────────────────────────────────────────────
+const ACHIEVEMENTS: Achievement[] = [
+  { id: 'first_claim', name: 'First Blood', description: 'Claim your first territory', icon: '🚩' },
+  { id: 'conqueror_10', name: 'Conqueror', description: 'Control 10 tiles simultaneously', icon: '👑' },
+  { id: 'conqueror_25', name: 'Warlord', description: 'Control 25 tiles simultaneously', icon: '⚔️' },
+  { id: 'streak_3', name: 'Dedicated', description: 'Login 3 days in a row', icon: '🔥' },
+  { id: 'streak_7', name: 'Committed', description: 'Login 7 days in a row', icon: '💪' },
+  { id: 'streak_30', name: 'Legendary', description: 'Login 30 days in a row', icon: '🏆' },
+  { id: 'attacker_100', name: 'Aggressor', description: 'Launch 100 attacks', icon: '⚡' },
+  { id: 'defender_50', name: 'Defender', description: 'Fortify 50 tiles', icon: '🛡️' },
+  { id: 'alliance_member', name: 'Team Player', description: 'Join an alliance', icon: '🤝' },
+  { id: 'alliance_leader', name: 'Leader', description: 'Create an alliance', icon: '👥' },
+  { id: 'powerup_master', name: 'Power User', description: 'Use 10 power-ups', icon: '⚡' },
+];
+
+// ─── Player stats helpers ─────────────────────────────────────────────────────
+async function loadPlayerStats(redis: Devvit.Context['redis'], username: string): Promise<PlayerStats> {
+  const raw = await redis.get(playerStatsKey(username));
+  if (!raw) {
+    return {
+      totalTilesClaimed: 0,
+      totalAttacks: 0,
+      totalFortifications: 0,
+      longestStreak: 0,
+      currentStreak: 0,
+      lastLoginDate: '',
+      achievements: [],
+      powerUpsUsed: 0,
+      karmaEarned: 0,
+    };
+  }
+  try {
+    return JSON.parse(raw) as PlayerStats;
+  } catch {
+    return {
+      totalTilesClaimed: 0,
+      totalAttacks: 0,
+      totalFortifications: 0,
+      longestStreak: 0,
+      currentStreak: 0,
+      lastLoginDate: '',
+      achievements: [],
+      powerUpsUsed: 0,
+      karmaEarned: 0,
+    };
+  }
+}
+
+async function savePlayerStats(redis: Devvit.Context['redis'], username: string, stats: PlayerStats): Promise<void> {
+  await redis.set(playerStatsKey(username), JSON.stringify(stats));
+}
+
+async function updateStreak(redis: Devvit.Context['redis'], username: string, stats: PlayerStats): Promise<PlayerStats> {
+  const today = utcDay();
+  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+  if (stats.lastLoginDate === today) {
+    return stats; // Already logged in today
+  }
+
+  if (stats.lastLoginDate === yesterday) {
+    stats.currentStreak += 1;
+  } else if (stats.lastLoginDate !== today) {
+    stats.currentStreak = 1; // Reset streak
+  }
+
+  stats.longestStreak = Math.max(stats.longestStreak, stats.currentStreak);
+  stats.lastLoginDate = today;
+
+  return stats;
+}
+
+async function checkAchievements(
+  redis: Devvit.Context['redis'],
+  username: string,
+  stats: PlayerStats,
+  board: Board
+): Promise<Achievement[]> {
+  const newAchievements: Achievement[] = [];
+  const unlockedIds = new Set(stats.achievements.map(a => a.id));
+
+  // Count current tiles
+  let tileCount = 0;
+  for (const row of board) {
+    for (const cell of row) {
+      if (cell.owner === username) tileCount++;
+    }
+  }
+
+  // Check each achievement
+  for (const achievement of ACHIEVEMENTS) {
+    if (unlockedIds.has(achievement.id)) continue;
+
+    let unlock = false;
+    switch (achievement.id) {
+      case 'first_claim':
+        unlock = stats.totalTilesClaimed > 0;
+        break;
+      case 'conqueror_10':
+        unlock = tileCount >= 10;
+        break;
+      case 'conqueror_25':
+        unlock = tileCount >= 25;
+        break;
+      case 'streak_3':
+        unlock = stats.currentStreak >= 3;
+        break;
+      case 'streak_7':
+        unlock = stats.currentStreak >= 7;
+        break;
+      case 'streak_30':
+        unlock = stats.currentStreak >= 30;
+        break;
+      case 'attacker_100':
+        unlock = stats.totalAttacks >= 100;
+        break;
+      case 'defender_50':
+        unlock = stats.totalFortifications >= 50;
+        break;
+      case 'powerup_master':
+        unlock = stats.powerUpsUsed >= 10;
+        break;
+      case 'alliance_member':
+        unlock = !!stats.allianceId;
+        break;
+    }
+
+    if (unlock) {
+      const unlockedAchievement = { ...achievement, unlockedAt: Date.now() };
+      stats.achievements.push(unlockedAchievement);
+      newAchievements.push(unlockedAchievement);
+      stats.karmaEarned += 10; // Award karma for achievements
+    }
+  }
+
+  if (newAchievements.length > 0) {
+    await savePlayerStats(redis, username, stats);
+  }
+
+  return newAchievements;
 }
 
 async function loadBoard(redis: Devvit.Context["redis"], postId: string): Promise<Board> {
@@ -307,17 +497,26 @@ Devvit.addCustomPostType({
         if (!postId) return;
 
         if (msg.type === "INIT") {
+          let stats = await loadPlayerStats(redis, username);
+          stats = await updateStreak(redis, username, stats);
+          await savePlayerStats(redis, username, stats);
+
           const [board, actionsLeft, leaderboard] = await Promise.all([
             loadBoard(redis, postId),
             getActionsLeft(redis, postId, username),
             getLeaderboard(redis, postId),
           ]);
+
+          const newAchievements = await checkAchievements(redis, username, stats, board);
+
           webView.postMessage({
             type: "INIT_RESPONSE",
             board,
             username,
             actionsLeft,
             leaderboard,
+            stats,
+            achievements: newAchievements,
           });
           return;
         }
@@ -331,6 +530,7 @@ Devvit.addCustomPostType({
 
         const board = await loadBoard(redis, postId);
         const cell = board[row][col];
+        let stats = await loadPlayerStats(redis, username);
 
         if (msg.type === "CLAIM") {
           if (cell.owner !== null) {
@@ -342,9 +542,15 @@ Devvit.addCustomPostType({
             return;
           }
           board[row][col] = { owner: username, fort: false };
+          stats.totalTilesClaimed += 1;
+          stats.karmaEarned += 1;
         } else if (msg.type === "ATTACK") {
           if (!cell.owner || cell.owner === username) {
             webView.postMessage({ type: "ERROR", message: "Nothing to attack." });
+            return;
+          }
+          if (cell.shield && cell.shieldExpiry && cell.shieldExpiry > Date.now()) {
+            webView.postMessage({ type: "ERROR", message: "Cell is shielded!" });
             return;
           }
           if (!(await consumeAction(redis, postId, username))) {
@@ -357,7 +563,10 @@ Devvit.addCustomPostType({
           } else {
             // Second hit (or unfortified) captures the cell
             board[row][col] = { owner: username, fort: false };
+            stats.totalTilesClaimed += 1;
           }
+          stats.totalAttacks += 1;
+          stats.karmaEarned += 2;
         } else if (msg.type === "FORTIFY") {
           if (cell.owner !== username) {
             webView.postMessage({ type: "ERROR", message: "You don't own this cell." });
@@ -372,17 +581,29 @@ Devvit.addCustomPostType({
             return;
           }
           board[row][col] = { owner: username, fort: true };
+          stats.totalFortifications += 1;
+          stats.karmaEarned += 1;
         }
 
         await saveBoard(redis, postId, board);
         await updateLeaderboard(redis, postId, board);
+        await savePlayerStats(redis, username, stats);
+
+        const newAchievements = await checkAchievements(redis, username, stats, board);
 
         const [actionsLeft, leaderboard] = await Promise.all([
           getActionsLeft(redis, postId, username),
           getLeaderboard(redis, postId),
         ]);
 
-        webView.postMessage({ type: "UPDATE", board, actionsLeft, leaderboard });
+        webView.postMessage({ type: "UPDATE", board, actionsLeft, leaderboard, stats, achievements: newAchievements });
+
+        // Send achievement notifications
+        for (const achievement of newAchievements) {
+          setTimeout(() => {
+            webView.postMessage({ type: "ACHIEVEMENT_UNLOCKED", achievement });
+          }, 500);
+        }
 
         // Broadcast board updates to other viewers of this sector.
         try {

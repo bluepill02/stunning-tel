@@ -35,6 +35,24 @@
       background: #e94560; color: #fff;
       padding: 2px 10px; border-radius: 12px;
       font-size: 12px; font-weight: bold;
+      animation: pulse 2s ease-in-out infinite;
+    }
+    #hud .streak-badge {
+      background: linear-gradient(135deg, #ff6b6b, #ee5a24);
+      color: #fff;
+      padding: 2px 10px; border-radius: 12px;
+      font-size: 11px; font-weight: bold;
+    }
+    #hud .karma-badge {
+      background: linear-gradient(135deg, #ffd60a, #ffc300);
+      color: #000;
+      padding: 2px 10px; border-radius: 12px;
+      font-size: 11px; font-weight: bold;
+    }
+
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.05); }
     }
 
     /* Legend -------------------------------------------------------------- */
@@ -128,6 +146,133 @@
       animation: spin 0.8s linear infinite;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Achievement notification -------------------------------------------- */
+    #achievement-popup {
+      position: absolute;
+      top: 60px; right: 20px;
+      width: 300px;
+      background: linear-gradient(135deg, rgba(123,31,162,0.95), rgba(233,69,96,0.95));
+      border: 2px solid #ffd60a;
+      border-radius: 12px;
+      padding: 16px;
+      z-index: 50;
+      display: none;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+      animation: slideInRight 0.5s ease-out;
+    }
+    #achievement-popup.show { display: block; }
+    #achievement-popup .ach-header {
+      font-size: 14px;
+      font-weight: bold;
+      color: #ffd60a;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+    #achievement-popup .ach-title {
+      font-size: 18px;
+      font-weight: 900;
+      color: #fff;
+      margin-bottom: 4px;
+    }
+    #achievement-popup .ach-desc {
+      font-size: 12px;
+      color: #eee;
+    }
+
+    @keyframes slideInRight {
+      from {
+        transform: translateX(400px);
+        opacity: 0;
+      }
+      to {
+        transform: translateX(0);
+        opacity: 1;
+      }
+    }
+
+    /* Stats panel --------------------------------------------------------- */
+    #stats-panel {
+      position: absolute;
+      top: 42px; left: 0;
+      width: 160px;
+      background: rgba(10,10,30,0.88);
+      backdrop-filter: blur(4px);
+      border-right: 2px solid #4cc9f0;
+      padding: 8px 10px;
+      z-index: 10;
+      max-height: calc(100% - 80px);
+      overflow-y: auto;
+    }
+    #stats-panel h3 {
+      font-size: 11px;
+      color: #4cc9f0;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 6px;
+    }
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 10px;
+      color: #ddd;
+      margin: 3px 0;
+      padding: 2px 0;
+    }
+    .stat-label { color: #999; }
+    .stat-value { color: #fff; font-weight: bold; }
+
+    /* Achievement badges panel -------------------------------------------- */
+    #achievements-panel {
+      position: absolute;
+      bottom: 35px; right: 20px;
+      max-width: 200px;
+      background: rgba(10,10,30,0.85);
+      backdrop-filter: blur(4px);
+      border: 2px solid #ffd60a;
+      border-radius: 8px;
+      padding: 8px;
+      z-index: 10;
+      display: none;
+    }
+    #achievements-panel.show { display: block; }
+    #achievements-panel h3 {
+      font-size: 11px;
+      color: #ffd60a;
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+    .ach-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: rgba(123,31,162,0.3);
+      border: 1px solid #7b1fa2;
+      border-radius: 6px;
+      padding: 4px 6px;
+      margin: 2px;
+      font-size: 10px;
+      color: #fff;
+      cursor: help;
+    }
+    .ach-badge:hover {
+      background: rgba(123,31,162,0.5);
+      transform: scale(1.05);
+      transition: all 0.2s;
+    }
+
+    /* Cell animations ----------------------------------------------------- */
+    @keyframes cellCaptured {
+      0% { transform: scale(1); }
+      50% { transform: scale(1.2); }
+      100% { transform: scale(1); }
+    }
+
+    @keyframes cellAttacked {
+      0%, 100% { transform: translateX(0); }
+      25% { transform: translateX(-2px); }
+      75% { transform: translateX(2px); }
+    }
   </style>
 </head>
 <body>
@@ -144,6 +289,33 @@
   <span class="brand">⚔ SUBRWAR</span>
   <span class="info">Playing as <span id="hud-user">…</span></span>
   <span class="info">Actions today: <span class="actions-badge" id="hud-actions">5</span></span>
+  <span class="info">🔥 Streak: <span class="streak-badge" id="hud-streak">0</span></span>
+  <span class="info">💰 Karma: <span class="karma-badge" id="hud-karma">0</span></span>
+</div>
+
+<!-- Stats Panel -->
+<div id="stats-panel" style="display:none">
+  <h3>📊 Your Stats</h3>
+  <div class="stat-row">
+    <span class="stat-label">Tiles Claimed</span>
+    <span class="stat-value" id="stat-claimed">0</span>
+  </div>
+  <div class="stat-row">
+    <span class="stat-label">Attacks</span>
+    <span class="stat-value" id="stat-attacks">0</span>
+  </div>
+  <div class="stat-row">
+    <span class="stat-label">Fortifications</span>
+    <span class="stat-value" id="stat-forts">0</span>
+  </div>
+  <div class="stat-row">
+    <span class="stat-label">Longest Streak</span>
+    <span class="stat-value" id="stat-longest-streak">0</span>
+  </div>
+  <div class="stat-row">
+    <span class="stat-label">Achievements</span>
+    <span class="stat-value" id="stat-achievements">0</span>
+  </div>
 </div>
 
 <!-- Leaderboard -->
@@ -174,6 +346,19 @@
 
 <!-- Toast notification -->
 <div id="toast"></div>
+
+<!-- Achievement popup -->
+<div id="achievement-popup">
+  <div class="ach-header">🏆 Achievement Unlocked!</div>
+  <div class="ach-title" id="ach-popup-title">First Blood</div>
+  <div class="ach-desc" id="ach-popup-desc">Claim your first territory</div>
+</div>
+
+<!-- Achievement badges panel -->
+<div id="achievements-panel">
+  <h3>🏅 Recent Achievements</h3>
+  <div id="ach-badges"></div>
+</div>
 
 <!-- Phaser 3 (loaded from CDN — works in Devvit webview) -->
 <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
@@ -208,6 +393,8 @@ let gameState = {
   username:    '',
   actionsLeft: 0,
   leaderboard: [],
+  stats:       null,   // PlayerStats
+  achievements: [],    // Achievement[]
 };
 
 let selectedCell = null; // { col, row }
@@ -411,12 +598,58 @@ function showToast(msg, duration = 2800) {
 function updateHUD() {
   document.getElementById('hud-user').textContent    = gameState.username || '…';
   document.getElementById('hud-actions').textContent = gameState.actionsLeft;
+
+  if (gameState.stats) {
+    document.getElementById('hud-streak').textContent = gameState.stats.currentStreak || 0;
+    document.getElementById('hud-karma').textContent = gameState.stats.karmaEarned || 0;
+  }
+}
+
+function updateStatsPanel() {
+  if (!gameState.stats) return;
+
+  document.getElementById('stat-claimed').textContent = gameState.stats.totalTilesClaimed || 0;
+  document.getElementById('stat-attacks').textContent = gameState.stats.totalAttacks || 0;
+  document.getElementById('stat-forts').textContent = gameState.stats.totalFortifications || 0;
+  document.getElementById('stat-longest-streak').textContent = gameState.stats.longestStreak || 0;
+  document.getElementById('stat-achievements').textContent = gameState.stats.achievements?.length || 0;
+}
+
+function updateAchievementsBadges() {
+  if (!gameState.stats || !gameState.stats.achievements) return;
+
+  const badgesContainer = document.getElementById('ach-badges');
+  const recentAchievements = gameState.stats.achievements.slice(-5).reverse(); // Show last 5
+
+  badgesContainer.innerHTML = recentAchievements
+    .map(ach => `<div class="ach-badge" title="${ach.description}">${ach.icon} ${ach.name}</div>`)
+    .join('');
+
+  const achievementsPanel = document.getElementById('achievements-panel');
+  if (recentAchievements.length > 0) {
+    achievementsPanel.classList.add('show');
+  }
+}
+
+function showAchievementPopup(achievement) {
+  const popup = document.getElementById('achievement-popup');
+  document.getElementById('ach-popup-title').textContent = `${achievement.icon} ${achievement.name}`;
+  document.getElementById('ach-popup-desc').textContent = achievement.description;
+
+  popup.classList.add('show');
+
+  setTimeout(() => {
+    popup.classList.remove('show');
+  }, 4000);
 }
 
 function updateLeaderboard() {
   const list = document.getElementById('lb-list');
   list.innerHTML = gameState.leaderboard
-    .map((e, i) => `<div class="lb-entry"><span class="lb-name">${i+1}. ${e.username}</span><span class="lb-tiles">${e.tiles}</span></div>`)
+    .map((e, i) => {
+      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '';
+      return `<div class="lb-entry"><span class="lb-name">${medal} ${i+1}. ${e.username}</span><span class="lb-tiles">${e.tiles}</span></div>`;
+    })
     .join('');
 }
 
@@ -424,6 +657,7 @@ function updateLeaderboard() {
 function showUI() {
   document.getElementById('loading').style.display     = 'none';
   document.getElementById('hud').style.display          = 'flex';
+  document.getElementById('stats-panel').style.display  = 'block';
   document.getElementById('leaderboard').style.display  = 'block';
   document.getElementById('legend').style.display       = 'flex';
 }
@@ -441,8 +675,21 @@ window.addEventListener('message', (event) => {
       gameState.username    = msg.username;
       gameState.actionsLeft = msg.actionsLeft;
       gameState.leaderboard = msg.leaderboard ?? [];
+      gameState.stats       = msg.stats ?? null;
+      gameState.achievements = msg.achievements ?? [];
+
       updateHUD();
+      updateStatsPanel();
       updateLeaderboard();
+      updateAchievementsBadges();
+
+      // Show any newly unlocked achievements on login
+      if (msg.achievements && msg.achievements.length > 0) {
+        msg.achievements.forEach((ach, idx) => {
+          setTimeout(() => showAchievementPopup(ach), idx * 1000);
+        });
+      }
+
       const scene = game.scene.getScene('GameScene');
       if (scene?.sys.isActive()) scene.applyUpdate(msg.board);
       showUI();
@@ -452,11 +699,23 @@ window.addEventListener('message', (event) => {
       gameState.board       = msg.board;
       gameState.actionsLeft = msg.actionsLeft;
       gameState.leaderboard = msg.leaderboard ?? [];
+      gameState.stats       = msg.stats ?? gameState.stats;
+
       updateHUD();
+      updateStatsPanel();
       updateLeaderboard();
+      updateAchievementsBadges();
+
       const scene = game.scene.getScene('GameScene');
       if (scene?.sys.isActive()) scene.applyUpdate(msg.board);
       showToast('Board updated! ✅');
+      break;
+    }
+    case 'ACHIEVEMENT_UNLOCKED': {
+      if (msg.achievement) {
+        showAchievementPopup(msg.achievement);
+        showToast(`🏆 Achievement: ${msg.achievement.name}!`, 3000);
+      }
       break;
     }
     case 'BOARD_UPDATE': {
